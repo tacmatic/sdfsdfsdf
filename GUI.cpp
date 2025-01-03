@@ -37,15 +37,17 @@ static void ConvertToRGB(int hex, float color[3])
 	color[2] = ((hex >> (0)) & 0x000000ff) / 255.0f;
 };
 
-Menu::Menu(bool& running, User& user) 
+Menu::Menu(bool& running, User& user)
 {
 	m_Running = &running;
 	m_User = &user;
 
+	// Konvertiere Farbwerte
 	ConvertToRGB(m_User->SearchSettings.color, m_User->SearchSettings.colorRGB);
 
-	std::thread ThreadMenu(&Menu::Start, this);
-	ThreadMenu.detach();
+	// Starte den Menü-Rendering-Thread
+	std::thread threadMenu(&Menu::MenuThread, this);
+	threadMenu.detach();  // Thread im Hintergrund laufen lassen
 }
 
 std::string get_random_process_name()
@@ -55,68 +57,83 @@ std::string get_random_process_name()
 	return names[index];
 }
 
+
 void Menu::Start() {
-	// Create console if enabled in User.ini file
+
+	// Erstelle Konsole, wenn im User.ini-File aktiviert
 	if (m_User->Data.debug) {
 		AllocConsole();
 		BindCrtHandlesToStdHandles(true, true, true);
 	}
 
-	// Create application window
-	std::string process_name{ get_random_process_name() }; // Vanguard Bypass
-	SetConsoleTitleW((LPCWSTR)process_name.c_str());
+	// Fensterklasse erstellen
 	WNDCLASSEXW wc = {
-		sizeof(wc),
-		CS_CLASSDC,
-		WndProc, 0L, 0L,
-		GetModuleHandle(nullptr),
-		nullptr, nullptr,
-		nullptr, nullptr,
-		L"RandomWindowClass",
-		nullptr
+		sizeof(wc),               // Größe der Struktur
+		CS_CLASSDC,               // Fensterklasse
+		WndProc,                  // Fensterprozedur
+		0L,                       // Weitere Parameter
+		0L,                       // Weitere Parameter
+		GetModuleHandle(nullptr), // Handle des Moduls
+		nullptr,                  // Icon
+		nullptr,                  // Cursor
+		nullptr,                  // Hintergrund
+		nullptr,                  // Menü
+		L"Xbox",                  // Fenstername
+		nullptr                   // Symbol
 	};
 
 	::RegisterClassExW(&wc);
+
+	// Fenstergröße definieren
 	int windowWidth = 320;
 	int windowHeight = 480;
 
+	// Fenster erstellen
 	HWND hwnd = ::CreateWindowW(
 		wc.lpszClassName,
-		(LPCWSTR)process_name.c_str(),
+		_(L"Xbox"),
 		WS_POPUP,
-		0, 0,
+		0,
+		0,
 		windowWidth, windowHeight,
 		nullptr, nullptr,
 		wc.hInstance, nullptr
 	);
 
-	// Initialize Direct3D
-	if (!CreateDeviceD3D(hwnd)) {
-		CleanupDeviceD3D();
-		::UnregisterClassW(wc.lpszClassName, wc.hInstance);
-		std::cerr << '\n' << _("[ImGui] Could not initialize Direct3D");
+	// Stelle sicher, dass hwnd und wc initialisiert sind, bevor sie verwendet werden
+	if (hwnd == nullptr) {
+		std::cerr << "[Error] Fenster konnte nicht erstellt werden." << std::endl;
 		return;
 	}
 
-	// Show the window
+	// Direkt3D initialisieren
+	if (!CreateDeviceD3D(hwnd)) {
+		CleanupDeviceD3D();
+		::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+		std::cerr << "[ImGui] Konnte Direct3D nicht initialisieren" << std::endl;
+		return;
+	}
+
+	// Fenster anzeigen
 	bool hidden = false;
 	::ShowWindow(hwnd, SW_SHOWDEFAULT);
 	::UpdateWindow(hwnd);
 
-	// Setup Dear ImGui context
+	// ImGui Kontext erstellen
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO(); (void)io;
 	io.IniFilename = NULL;
 
-	// Setup Dear ImGui style
+	// ImGui-Stil setzen
 	StyleMenu();
 
-	// Setup Platform/Renderer backends
+	// Plattform/Renderer Backends setzen
 	ImGui_ImplWin32_Init(hwnd);
 	ImGui_ImplDX11_Init(m_pd3dDevice, m_pd3dDeviceContext);
 
+	// Haupt-Rendering-Schleife
 	while (*m_Running) {
-		// Poll and handle messages
+		// Nachrichten abfragen und verarbeiten (Eingaben, Fenstergröße, etc.)
 		MSG msg;
 		while (::PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
 			::TranslateMessage(&msg);
@@ -137,17 +154,17 @@ void Menu::Start() {
 			::ShowWindow(hwnd, SW_SHOWDEFAULT);
 		}
 
-		// Start the Dear ImGui frame
+		// Starten des ImGui-Frames
 		ImGui_ImplDX11_NewFrame();
 		ImGui_ImplWin32_NewFrame();
 		ImGui::NewFrame();
 
-		// Cover full viewport size
+		// Vollbildansicht setzen
 		ImGuiViewport* viewport = ImGui::GetMainViewport();
 		ImGui::SetNextWindowPos(viewport->Pos);
 		ImGui::SetNextWindowSize(viewport->Size);
 
-		// Render
+		// Rendern
 		if (!m_User->Data.loadedApp) {
 			DrawLoading();
 		}
@@ -155,19 +172,52 @@ void Menu::Start() {
 			DrawMenu();
 		}
 
-		// Rendering
+		// Rendering durchführen
 		ImGui::Render();
 		m_pd3dDeviceContext->OMSetRenderTargets(1, &m_mainRenderTargetView, nullptr);
 		ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-		m_pSwapChain->Present(1, 0); // Present with vsync
+		// Präsentation mit vsync
+		m_pSwapChain->Present(1, 0);
 	}
 
-	// Cleanup
+	// Aufräumen
 	ImGui_ImplDX11_Shutdown();
 	ImGui_ImplWin32_Shutdown();
 	ImGui::DestroyContext();
 
+	CleanupDeviceD3D();
+	::DestroyWindow(hwnd);
+	::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+}
+
+void Menu::MenuThread()
+{
+	// Setze den Konsolentitel, um den Prozess zu tarnen (wichtig für den Vanguard-Bypass)
+	std::string process_name = get_random_process_name(); // Funktion zur Generierung eines zufälligen Prozesses
+	SetConsoleTitleW((LPCWSTR)process_name.c_str());
+
+	// Erstelle das Fenster und initialisiere das Rendering
+	::CreateWindowW(wc.lpszClassName, _(L"Xbox"), WS_POPUP, 0, 0, 320, 480, nullptr, nullptr, wc.hInstance, nullptr);
+	CreateDeviceD3D(hwnd); // Erstelle D3D-Geräte
+	CreateRenderTarget(); // Erstelle Renderziel
+	ImGui_ImplWin32_Init(hwnd);
+	ImGui_ImplDX11_Init(m_pd3dDevice, m_pd3dDeviceContext);
+
+	// Haupt-Rendering-Schleife
+	while (*m_Running)
+	{
+		// Rendern des Menüs
+		DrawMenu(); // Hier verwenden wir Ihre Funktion zum Rendern des Menüs.
+
+		// Rendering-Pause, um Systemressourcen zu schonen
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+
+	// Ressourcen bereinigen, wenn der Thread beendet wird
+	ImGui_ImplDX11_Shutdown();
+	ImGui_ImplWin32_Shutdown();
+	ImGui::DestroyContext();
 	CleanupDeviceD3D();
 	::DestroyWindow(hwnd);
 	::UnregisterClassW(wc.lpszClassName, wc.hInstance);
